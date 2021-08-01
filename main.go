@@ -1,22 +1,17 @@
 package main
 
 import (
-	"io"
 	"log"
 	"net"
 )
 
 var (
-	count = make(chan int, 1024)
+	connCount = make(chan int, 4096)
 )
 
 func handleErr(err error) bool {
 	if err != nil {
-		if err != io.EOF {
-			return true
-		} else {
-			return true
-		}
+		return true
 	} else {
 		return false
 	}
@@ -29,11 +24,11 @@ func handleConn(conn *net.TCPConn) {
 		return
 	}
 
-	count <- 1
+	connCount <- 1
 	defer serviceConn.Close()
 	defer conn.Close()
 	defer func() {
-		<-count
+		<-connCount
 	}()
 
 	done := make(chan bool)
@@ -42,7 +37,7 @@ func handleConn(conn *net.TCPConn) {
 		var buff [512]byte
 		for {
 			n, err := conn.Read(buff[0:])
-			if handleErr(err) || n == 0 {
+			if handleErr(err) {
 				done <- true
 				return
 			}
@@ -59,7 +54,7 @@ func handleConn(conn *net.TCPConn) {
 		var buff [512]byte
 		for {
 			n, err := serviceConn.Read(buff[0:])
-			if handleErr(err) || n == 0 {
+			if handleErr(err) {
 				done <- true
 				return
 			}
