@@ -1,0 +1,10 @@
+{
+  "host": "127.0.0.1",
+  "port": 8000,
+
+  "service_host": "127.0.0.1",
+  "service_port": 9000,
+
+  "consul_host": "localhost",
+  "service_name": "hello"
+}
