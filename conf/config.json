@@ -1,6 +1,7 @@
 {
   "host": "127.0.0.1",
   "port": 8000,
+  "service_cnt_max":4,
   "consul_host": "localhost",
   "consul_service_name": "hello",
   "service_host": "127.0.0.1",

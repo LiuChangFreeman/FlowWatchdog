@@ -371,6 +371,8 @@ func main() {
 	}
 
 	servicePort := CastToInt(config["service_port"])
+	serviceCntMax = CastToInt(config["service_cnt_max"])
+	servicePorts = make(chan int, serviceCntMax)
 	for i := 0; i < serviceCntMax; i++ {
 		servicePorts <- servicePort + i
 	}
