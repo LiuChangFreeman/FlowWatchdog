@@ -1,10 +1,15 @@
 {
   "host": "127.0.0.1",
   "port": 8000,
-
+  "consul_host": "localhost",
+  "consul_service_name": "hello",
   "service_host": "127.0.0.1",
   "service_port": 9000,
-
-  "consul_host": "localhost",
-  "service_name": "hello"
+  "docker_image":"flask",
+  "docker_image_tag":"init",
+  "docker_command":"sudo docker run -id --rm --name %v --security-opt seccomp=unconfined -p 127.0.0.1:%v:%v -v /home/lazy:/usr/src/dir -w /usr/src/dir %v:%v python /usr/src/dir/lazy.py",
+  "use_criu":true,
+  "checkpoint_path":"/volume/flask/init",
+  "checkpoint_path_temp":"/volume/flask/temp",
+  "docker_command_criu":"sudo docker create --name %v -p 0.0.0.0:%v:%v -v /home/lazy:/usr/src/dir -w /usr/src/dir --privileged=true %v:%v"
 }

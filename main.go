@@ -1,7 +1,6 @@
 package main
 
 import (
-	"FlowWatchdog/utils"
 	"fmt"
 	"log"
 	"math/rand"
@@ -12,17 +11,18 @@ import (
 )
 
 var (
-	createDuration    = time.Second * 2
-	deletedDuration   = time.Second * 2
-	servicesMax       = 1
-	connUpThreshold   = 128
-	connDownThreshold = 64
-	lastCreated       = time.Time{}
-	lastDeleted       = time.Time{}
-	connCnt           = make(chan int, 4096)
-	services          = []Service{}
-	servicesPorts     = make(chan int, servicesMax)
-	config            = make(map[string]interface{})
+	createDuration     = time.Second * 2
+	deletedDuration    = time.Second * 2
+	serviceTtl         = time.Second * 30
+	serviceCntMax      = 1
+	connUpperThreshold = 128
+	connDownThreshold  = 64
+	lastCreated        = time.Time{}
+	lastDeleted        = time.Time{}
+	connCnt            = make(chan int, 4096)
+	services           = []Service{}
+	servicePorts       = make(chan int, serviceCntMax)
+	config             = make(map[string]interface{})
 )
 
 func handleErr(err error) bool {
@@ -150,15 +150,20 @@ func handleConn(conn *net.TCPConn) {
 }
 
 func newServiceInstance(port int) {
-	cmdStr := fmt.Sprintf("sudo docker run -id --rm --name flask_%v --security-opt seccomp=unconfined -p 127.0.0.1:%v:9000 -v /home/lazy:/usr/src/dir -w /usr/src/dir flask python /usr/src/dir/lazy.py", port, port)
+	image := CastToStr(config["docker_image"])
+	tag := CastToStr(config["docker_image_tag"])
+	host := CastToStr(config["service_host"])
+	portOri := CastToInt(config["service_port"])
+	cmdFmt := CastToStr(config["docker_command"])
+	name := fmt.Sprintf("flask_%v", port)
+
+	cmdStr := fmt.Sprintf(cmdFmt, name, port, portOri, image, tag)
 	_, _ = exec.Command("/bin/sh", "-c", cmdStr).Output()
-	host := utils.CastToStr(config["service_host"])
 	regSucc := registerService(host, port, 10)
 	if !regSucc {
 		log.Fatal("fail to register watchdog to consul")
 		return
 	}
-	name := fmt.Sprintf("flask_%v", port)
 	service := Service{
 		name:    name,
 		created: time.Now(),
@@ -167,7 +172,7 @@ func newServiceInstance(port int) {
 	}
 	url := fmt.Sprintf("http://%v:%v", host, port)
 	for {
-		result := utils.HttpGet(url)
+		result := HttpGet(url)
 		if result {
 			break
 		}
@@ -176,23 +181,10 @@ func newServiceInstance(port int) {
 	services = append(services, service)
 }
 
-func registerService(host string, port int, weight int) bool {
-	consulHost := utils.CastToStr(config["consul_host"])
-	serviceName := utils.CastToStr(config["service_name"])
-	url := fmt.Sprintf("http://%v:8500/v1/kv/upstreams/%v/%v:%v", consulHost, serviceName, host, port)
-	data := map[string]int{"weight": weight, "max_fails": 3, "fail_timeout": 10}
-	regSucc := utils.HttpPut(url, data)
-	if !regSucc {
-		log.Fatal("fail to register to consul")
-		return false
-	}
-	return true
-}
-
 func removeServiceInstance(index int) {
 	service := services[index]
 	defer func() {
-		servicesPorts <- service.port
+		servicePorts <- service.port
 	}()
 	services = append(services[:index], services[index+1:]...)
 	cmdStr := fmt.Sprintf("sudo docker stop %v", service.name)
@@ -205,11 +197,98 @@ func removeServiceInstance(index int) {
 	fmt.Println("service removed")
 }
 
-func unregisterService(host string, port int) bool {
-	consulHost := utils.CastToStr(config["consul_host"])
-	serviceName := utils.CastToStr(config["service_name"])
+func newServiceInstanceLazy(port int) {
+	image := CastToStr(config["docker_image"])
+	tag := CastToStr(config["docker_image_tag"])
+	host := CastToStr(config["service_host"])
+	portOrigin := CastToInt(config["service_port"])
+	name := fmt.Sprintf("%v_%v", image, port)
+	pathCheckpointOrigin := CastToStr(config["checkpoint_path"])
+	pathCheckpointTemp := CastToStr(config["checkpoint_path_temp"])
+	cmdFmt := CastToStr(config["docker_command_criu"])
+
+	pathCheckpoint := fmt.Sprintf("%v/%v", pathCheckpointTemp, port)
+
+	cmdStr := fmt.Sprintf("cp -R --reflink=always -a %v %v", pathCheckpointOrigin, pathCheckpoint)
+	_, _ = exec.Command("/bin/sh", "-c", cmdStr).Output()
+
+	cmdStr = fmt.Sprintf(cmdFmt, name, port, portOrigin, image, tag)
+	_, _ = exec.Command("/bin/sh", "-c", cmdStr).Output()
+
+	go func() {
+		cmdStr = fmt.Sprintf("criu lazy-pages --images-dir %v &", pathCheckpoint)
+		_, _ = exec.Command("/bin/sh", "-c", cmdStr).Output()
+		fmt.Println("lazy-pages done")
+	}()
+
+	cmdStr = fmt.Sprintf("docker start --checkpoint-dir=%v --checkpoint=%v %v", pathCheckpointTemp, port, name)
+	_, _ = exec.Command("/bin/sh", "-c", cmdStr).Output()
+
+	regSucc := registerService(host, port, 10)
+	if !regSucc {
+		log.Fatal("fail to register watchdog to consul")
+		return
+	}
+	service := Service{
+		created: time.Now(),
+		name:    name,
+		host:    host,
+		port:    port,
+	}
+	url := fmt.Sprintf("http://%v:%v", host, port)
+	for {
+		result := HttpGet(url)
+		if result {
+			break
+		}
+	}
+	fmt.Println("service created")
+	services = append(services, service)
+}
+
+func removeServiceInstanceLazy(index int) {
+	service := services[index]
+	defer func() {
+		servicePorts <- service.port
+	}()
+	services = append(services[:index], services[index+1:]...)
+
+	cmdStr := fmt.Sprintf("sudo docker stop %v", service.name)
+	_, _ = exec.Command("/bin/sh", "-c", cmdStr).Output()
+
+	cmdStr = fmt.Sprintf("sudo docker rm %v", service.name)
+	_, _ = exec.Command("/bin/sh", "-c", cmdStr).Output()
+
+	pathCheckpoint := fmt.Sprintf("/volume/flask/temp/%v", service.port)
+	cmdStr = fmt.Sprintf("rm -rf %v", pathCheckpoint)
+	_, _ = exec.Command("/bin/sh", "-c", cmdStr).Output()
+
+	unregSucc := unregisterService(service.host, service.port)
+	if !unregSucc {
+		log.Fatal("fail to register watchdog to consul")
+		return
+	}
+	fmt.Println("service removed")
+}
+
+func registerService(host string, port int, weight int) bool {
+	consulHost := CastToStr(config["consul_host"])
+	serviceName := CastToStr(config["consul_service_name"])
 	url := fmt.Sprintf("http://%v:8500/v1/kv/upstreams/%v/%v:%v", consulHost, serviceName, host, port)
-	regSucc := utils.HttpDelete(url)
+	data := map[string]int{"weight": weight, "max_fails": 3, "fail_timeout": 10}
+	regSucc := HttpPut(url, data)
+	if !regSucc {
+		log.Fatal("fail to register to consul")
+		return false
+	}
+	return true
+}
+
+func unregisterService(host string, port int) bool {
+	consulHost := CastToStr(config["consul_host"])
+	serviceName := CastToStr(config["consul_service_name"])
+	url := fmt.Sprintf("http://%v:8500/v1/kv/upstreams/%v/%v:%v", consulHost, serviceName, host, port)
+	regSucc := HttpDelete(url)
 	if !regSucc {
 		log.Fatal("fail to unregister from consul")
 		return false
@@ -218,6 +297,7 @@ func unregisterService(host string, port int) bool {
 }
 
 func schedule() {
+	useCriu := CastToBool(config["use_criu"])
 	for range time.Tick(time.Millisecond * 100) {
 		currentCnt := len(connCnt)
 		serviceCnt := len(services)
@@ -227,27 +307,39 @@ func schedule() {
 		} else {
 			concurrency = currentCnt * (serviceCnt*10 + 1) / serviceCnt
 		}
-		if currentCnt > 0 && serviceCnt == 0 {
+		if currentCnt > 0 && serviceCnt == 0 && len(servicePorts) > 0 {
 			if time.Since(lastCreated) > createDuration {
 				fmt.Println("new service")
 				lastCreated = time.Now()
-				go newServiceInstance(<-servicesPorts)
+				if useCriu {
+					go newServiceInstanceLazy(<-servicePorts)
+				} else {
+					go newServiceInstance(<-servicePorts)
+				}
 			}
 		}
-		if concurrency > connUpThreshold && serviceCnt < servicesMax {
+		if concurrency > connUpperThreshold && serviceCnt < serviceCntMax && len(servicePorts) > 0 {
 			if time.Since(lastCreated) > createDuration {
 				fmt.Println("new service")
 				lastCreated = time.Now()
-				go newServiceInstance(<-servicesPorts)
+				if useCriu {
+					go newServiceInstanceLazy(<-servicePorts)
+				} else {
+					go newServiceInstance(<-servicePorts)
+				}
 			}
 		}
 		if concurrency < connDownThreshold {
 			if time.Since(lastDeleted) > deletedDuration {
 				for index, service := range services {
-					if time.Since(service.created) >= time.Second*10 {
+					if time.Since(service.created) >= serviceTtl {
 						fmt.Println("remove service")
 						lastDeleted = time.Now()
-						go removeServiceInstance(index)
+						if useCriu {
+							go removeServiceInstanceLazy(index)
+						} else {
+							go removeServiceInstance(index)
+						}
 						break
 					}
 				}
@@ -258,10 +350,10 @@ func schedule() {
 }
 
 func main() {
-	config = utils.GetConfig()
+	config = GetConfig()
 
-	host := utils.CastToStr(config["host"])
-	port := utils.CastToInt(config["port"])
+	host := CastToStr(config["host"])
+	port := CastToInt(config["port"])
 	address := net.TCPAddr{
 		IP:   net.ParseIP(host),
 		Port: port,
@@ -278,9 +370,9 @@ func main() {
 		return
 	}
 
-	servicePort := utils.CastToInt(config["service_port"])
-	for i := 0; i < servicesMax; i++ {
-		servicesPorts <- servicePort + i
+	servicePort := CastToInt(config["service_port"])
+	for i := 0; i < serviceCntMax; i++ {
+		servicePorts <- servicePort + i
 	}
 
 	defer func() {
